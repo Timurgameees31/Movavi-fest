@@ -37,12 +37,11 @@ button_teacher_inline = types.InlineKeyboardButton("Зарегистрирова
 button_logout_inline = types.InlineKeyboardButton("Выход", callback_data="logout")
 keyboard.add(button_link_inline, button_inline, button_rating_inline, button_quest_inline, button_teacher_inline, button_profile_inline)
 
-# Репли-клавиатуры по ролям
 student_reply_keyboard = types.ReplyKeyboardMarkup(resize_keyboard=True)
 student_reply_keyboard.add(
     types.KeyboardButton("FAQ"),
     types.KeyboardButton("Рейтинг пользователей"),
-    types.KeyboardButton("Задания"),
+    types.KeyboardButton("Получить задание"),
     types.KeyboardButton("Профиль"),
     types.KeyboardButton("Выход")
 )
@@ -53,7 +52,7 @@ teacher_reply_keyboard.add(
     types.KeyboardButton("Рейтинг пользователей"),
     types.KeyboardButton("Выдать задание"),
     types.KeyboardButton("Профиль"),
-    types.KeyboardButton("Проверить ответы"),
+    types.KeyboardButton("Проверить задания"),
     types.KeyboardButton("Выход")
 )
 
@@ -590,103 +589,6 @@ def review_answer(call):
 @bot.message_handler(func=lambda message: message.text == "Выдать задание")
 def give_task(call_or_msg):
     chat_id = call_or_msg.message.chat.id if hasattr(call_or_msg, 'message') else call_or_msg.chat.id
-    USER_STATE[chat_id] = {'step': 'get_student_id'}
-    bot.send_message(chat_id, "Введите ID ученика, которому хотите выдать задание:")
-
-@bot.callback_query_handler(func=lambda call: call.data.startswith("task_class_"))
-def process_task_class_selection(call):
-    user_id = call.message.chat.id
-    letter = call.data.split("_")[2]
-    school_class = f"{USER_STATE[user_id]['grade']}{letter}"
-    USER_STATE[user_id]['school_class'] = school_class
-    USER_STATE[user_id]['step'] = 'get_task_text'
-    bot.send_message(user_id, f"Вы выбрали класс {school_class}. Теперь введите текст задания:")
-
-@bot.message_handler(func=lambda message: message.chat.id in USER_STATE and USER_STATE[message.chat.id]['step'] == 'get_task_text')
-def process_task_text(message):
-    user_id = message.chat.id
-    USER_STATE[user_id]['task_text'] = message.text
-    USER_STATE[user_id]['step'] = 'get_task_points'
-    bot.send_message(user_id, "Введите количество баллов за выполнение этого задания:")
-
-
-@bot.message_handler(func=lambda message: message.chat.id in USER_STATE and USER_STATE[message.chat.id]['step'] == 'get_task_points')
-def process_task_points(message):
-    user_id = message.chat.id
-    try:
-        points = int(message.text)
-        if points <= 0:
-            raise ValueError
-        
-        task_text = USER_STATE[user_id]['task_text']
-        teacher_id = user_id
-        
-        conn = sqlite3.connect('users.db')
-        c = conn.cursor()
-        
-        if 'target' not in USER_STATE[user_id] or USER_STATE[user_id]['target'] == 'student':
-            # Отправка одному ученику (старая логика)
-            student_id = USER_STATE[user_id]['student_id']
-            c.execute("""INSERT INTO tasks 
-                        (student_id, teacher_id, task_text, points, status) 
-                        VALUES (?, ?, ?, ?, 'pending')""",
-                     (student_id, teacher_id, task_text, points))
-            conn.commit()
-            bot.send_message(user_id, f"Задание успешно отправлено ученику с ID {student_id}.")
-            
-            try:
-                bot.send_message(student_id, "У вас новое задание от учителя! Нажмите кнопку 'Получить задание' для просмотра.")
-            except Exception as e:
-                bot.send_message(user_id, f"Задание сохранено, но не удалось уведомить ученика: {e}")
-                
-        else:
-            # Отправка всему классу (новая логика)
-            school_class = USER_STATE[user_id]['school_class']
-            c.execute("SELECT tg_id FROM users WHERE school_class=? AND role='student' AND is_active=1", (school_class,))
-            students = c.fetchall()
-            
-            if not students:
-                bot.send_message(user_id, f"В классе {school_class} нет активных учеников.")
-                conn.close()
-                del USER_STATE[user_id]
-                return
-            
-            count = 0
-            failed = 0
-            for student in students:
-                try:
-                    student_id = student[0]
-                    c.execute("""INSERT INTO tasks 
-                                (student_id, teacher_id, task_text, points, status) 
-                                VALUES (?, ?, ?, ?, 'pending')""",
-                             (student_id, teacher_id, task_text, points))
-                    count += 1
-                    
-                    try:
-                        bot.send_message(student_id, "У вас новое задание от учителя! Нажмите кнопку 'Получить задание' для просмотра.")
-                    except:
-                        failed += 1
-                        
-                except Exception as e:
-                    print(f"Ошибка при отправке задания ученику {student_id}: {e}")
-                    failed += 1
-            
-            conn.commit()
-            if failed > 0:
-                bot.send_message(user_id, f"Задание отправлено {count} ученикам класса {school_class}. Не удалось уведомить {failed} учеников.")
-            else:
-                bot.send_message(user_id, f"Задание успешно отправлено всем {count} ученикам класса {school_class}.")
-        
-        conn.close()
-        del USER_STATE[user_id]
-        
-    except ValueError:
-        bot.send_message(user_id, "Количество баллов должно быть положительным числом. Попробуйте еще раз:")
-
-@bot.callback_query_handler(func=lambda call: call.data == "quest_give")
-@bot.message_handler(func=lambda message: message.text == "Выдать задание")
-def give_task(call_or_msg):
-    chat_id = call_or_msg.message.chat.id if hasattr(call_or_msg, 'message') else call_or_msg.chat.id
     keyboard = types.InlineKeyboardMarkup(row_width=2)
     keyboard.add(
         types.InlineKeyboardButton("Отдельному ученику", callback_data="give_to_student"),
@@ -706,9 +608,87 @@ def give_to_class(call):
     USER_STATE[user_id] = {'step': 'select_class_grade', 'target': 'class'}
     send_grade_selection_for_task(user_id)
 
+@bot.message_handler(func=lambda message: message.chat.id in USER_STATE and USER_STATE[message.chat.id]['step'] == 'get_task_points')
+def process_task_points(message):
+    user_id = message.chat.id
+    try:
+        points = int(message.text)
+        if points <= 0:
+            raise ValueError
+        
+        task_text = USER_STATE[user_id]['task_text']
+        teacher_id = user_id
+        
+        conn = sqlite3.connect('users.db')
+        c = conn.cursor()
+        
+        if USER_STATE[user_id]['target'] == 'student':
+            # Отправка одному ученику
+            student_id = USER_STATE[user_id]['student_id']
+            c.execute("""INSERT INTO tasks 
+                        (student_id, teacher_id, task_text, points, status) 
+                        VALUES (?, ?, ?, ?, 'pending')""",
+                     (student_id, teacher_id, task_text, points))
+            conn.commit()
+            bot.send_message(user_id, f"Задание успешно отправлено ученику с ID {student_id}.")
+            
+            try:
+                bot.send_message(student_id, "У вас новое задание от учителя! Нажмите кнопку 'Получить задание' для просмотра.")
+            except Exception as e:
+                bot.send_message(user_id, f"Задание сохранено, но не удалось уведомить ученика: {e}")
+                
+        else:
+            # Отправка всему классу
+            school_class = USER_STATE[user_id]['school_class']
+            c.execute("SELECT tg_id FROM users WHERE school_class=? AND role='student' AND is_active=1", (school_class,))
+            students = c.fetchall()
+            
+            if not students:
+                bot.send_message(user_id, f"В классе {school_class} нет активных учеников.")
+                conn.close()
+                del USER_STATE[user_id]
+                return
+            
+            count = 0
+            failed_notifications = 0
+            for student in students:
+                try:
+                    student_id = student[0]
+                    c.execute("""INSERT INTO tasks 
+                                (student_id, teacher_id, task_text, points, status) 
+                                VALUES (?, ?, ?, ?, 'pending')""",
+                             (student_id, teacher_id, task_text, points))
+                    count += 1
+                    
+                    try:
+                        bot.send_message(student_id, "У вас новое задание от учителя! Нажмите кнопку 'Получить задание' для просмотра.")
+                    except:
+                        failed_notifications += 1
+                        
+                except Exception as e:
+                    print(f"Ошибка при отправке задания ученику {student_id}: {e}")
+                    continue
+            
+            conn.commit()
+            
+            if failed_notifications > 0:
+                bot.send_message(user_id, f"Задание отправлено {count} ученикам класса {school_class}. Не удалось уведомить {failed_notifications} учеников.")
+            else:
+                bot.send_message(user_id, f"Задание успешно отправлено всем {count} ученикам класса {school_class}.")
+        
+        conn.close()
+        del USER_STATE[user_id]
+        
+    except ValueError:
+        bot.send_message(user_id, "Количество баллов должно быть положительным числом. Попробуйте еще раз:")
+    except Exception as e:
+        bot.send_message(user_id, f"Произошла ошибка: {str(e)}")
+        print(f"Ошибка при обработке задания: {e}")
+        del USER_STATE[user_id]
+
 def send_grade_selection_for_task(user_id):
     keyboard = types.InlineKeyboardMarkup(row_width=4)
-    buttons = [types.InlineKeyboardButton(str(grade), callback_data=f"task_grade_{grade}") for grade in range(1, 11)]
+    buttons = [types.InlineKeyboardButton(str(grade), callback_data=f"task_grade_{grade}") for grade in range(1, 12)]
     keyboard.add(*buttons)
     bot.send_message(user_id, "Выберите класс (номер):", reply_markup=keyboard)
 
@@ -725,6 +705,29 @@ def send_letter_selection_for_task(user_id):
     buttons = [types.InlineKeyboardButton(letter, callback_data=f"task_class_{letter}") for letter in ["А", "Б", "В"]]
     keyboard.add(*buttons)
     bot.send_message(user_id, "Выберите букву класса:", reply_markup=keyboard)
+
+def send_letter_selection_for_task(user_id):
+    keyboard = types.InlineKeyboardMarkup(row_width=3)
+    buttons = [types.InlineKeyboardButton(letter, callback_data=f"task_class_{letter}") 
+               for letter in ["А", "Б", "В"]]  # Буквы классов
+    keyboard.add(*buttons)
+    bot.send_message(user_id, "Выберите букву класса:", reply_markup=keyboard)
+
+@bot.callback_query_handler(func=lambda call: call.data.startswith("task_class_"))
+def process_task_class_selection(call):
+    user_id = call.message.chat.id
+    letter = call.data.split("_")[2]
+    school_class = f"{USER_STATE[user_id]['grade']}{letter}"
+    USER_STATE[user_id]['school_class'] = school_class
+    USER_STATE[user_id]['step'] = 'get_task_text'
+    bot.send_message(user_id, f"Вы выбрали класс {school_class}. Теперь введите текст задания:")
+
+@bot.message_handler(func=lambda message: message.chat.id in USER_STATE and USER_STATE[message.chat.id]['step'] == 'get_task_text')
+def process_task_text(message):
+    user_id = message.chat.id
+    USER_STATE[user_id]['task_text'] = message.text
+    USER_STATE[user_id]['step'] = 'get_task_points'
+    bot.send_message(user_id, "Введите количество баллов за выполнение этого задания:")
 
 @bot.callback_query_handler(func=lambda call: call.data.startswith(("correct_", "wrong_")))
 def review_answer(call):
