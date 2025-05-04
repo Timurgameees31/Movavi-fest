@@ -144,30 +144,38 @@ def create_db():
     conn.close()
 
 def register_user(first_name, last_name, username=None, school_class=None, role='student', user_id=None, password=None):
-    if not password:
-        print("Пароль не передан — регистрация невозможна.")
-        return
+    if not password or not user_id:
+        print("Не хватает обязательных данных для регистрации.")
+        return False
 
     try:
         with sqlite3.connect('users.db', timeout=10) as conn:
             c = conn.cursor()
             
-            # Проверяем, существует ли пользователь с таким tg_id
-            c.execute("SELECT * FROM users WHERE tg_id=?", (user_id,))
+            # Проверяем существование активного пользователя с таким tg_id
+            c.execute("SELECT * FROM users WHERE tg_id=? AND is_active=1", (user_id,))
+            active_user = c.fetchone()
+            
+            if active_user:
+                print("Активный пользователь с таким ID уже существует")
+                return False
+                
+            # Проверяем существование пользователя с таким именем и фамилией
+            c.execute("SELECT * FROM users WHERE first_name=? AND last_name=?", 
+                      (first_name, last_name))
             existing_user = c.fetchone()
             
             if existing_user:
-                # Если пользователь существует, обновляем его данные
+                # Если пользователь существует, но неактивен - обновляем его данные
                 c.execute("""UPDATE users SET 
-                            first_name=?, 
-                            last_name=?, 
+                            tg_id=?,
                             username=?, 
                             school_class=?, 
                             role=?, 
                             password=?, 
                             is_active=1 
-                            WHERE tg_id=?""",
-                         (first_name, last_name, username, school_class, role, password, user_id))
+                            WHERE first_name=? AND last_name=?""",
+                         (user_id, username, school_class, role, password, first_name, last_name))
             else:
                 # Если пользователя нет, создаем нового
                 c.execute("""INSERT INTO users 
@@ -176,11 +184,11 @@ def register_user(first_name, last_name, username=None, school_class=None, role=
                         (user_id, first_name, last_name, username, school_class, role, password))
             
             conn.commit()
-    except sqlite3.OperationalError as e:
-        print(f"Ошибка SQLite: {e}")
+            return True
     except Exception as e:
-        print(f"Ошибка при добавлении пользователя: {e}")
-
+        print(f"Ошибка при регистрации пользователя: {e}")
+        return False
+    
 @bot.message_handler(commands=['start'])
 def start_message(message):
     user_id = message.chat.id
@@ -211,10 +219,15 @@ def logout_user(message):
     user_id = message.chat.id
     conn = sqlite3.connect('users.db')
     c = conn.cursor()
-    # Просто деактивируем текущего пользователя (не удаляем)
+    # Деактивируем текущего пользователя
     c.execute("UPDATE users SET is_active=0 WHERE tg_id=? AND is_active=1", (user_id,))
     conn.commit()
     conn.close()
+    
+    # Очищаем состояние
+    if user_id in USER_STATE:
+        del USER_STATE[user_id]
+        
     bot.send_message(user_id, "Вы вышли из аккаунта. Для входа или регистрации нового аккаунта используйте кнопки ниже.", reply_markup=keyboard)
 
 @bot.callback_query_handler(func=lambda call: call.data == "logout")
@@ -316,8 +329,7 @@ def process_student_id(message):
     except ValueError:
         bot.send_message(user_id, "ID ученика должен быть числом. Попробуйте еще раз:")
 
-def show_profile(message):
-    user_id = message.chat.id
+def show_profile(user_id):
     conn = sqlite3.connect('users.db')
     c = conn.cursor()
     
@@ -414,24 +426,32 @@ def show_profile(message):
 
 @bot.callback_query_handler(func=lambda call: call.data == "profile")
 def profile_callback(call):
-    show_profile(call.message)
+    show_profile(call.message.chat.id
+)
 
 # При успешном входе любого пользователя
 def successful_login(user_id, role):
-    if role == 'teacher':
-        user_keyboard = types.InlineKeyboardMarkup()
-        user_keyboard.add(button_link_inline, button_rating_inline, button_quest_give_inline, button_profile_inline, button_logout_inline)
-        bot.send_message(user_id, "Вы вошли как учитель.", reply_markup=user_keyboard)
-        bot.send_message(user_id, "Для навигации используйте панель ниже.", reply_markup=teacher_reply_keyboard)
-    else:
-        user_keyboard = types.InlineKeyboardMarkup()
-        user_keyboard.add(button_link_inline, button_rating_inline, button_quest_inline, button_profile_inline, button_logout_inline)
-        bot.send_message(user_id, "Вы вошли как ученик.", reply_markup=user_keyboard)
-        bot.send_message(user_id, "Для навигации используй панель ниже.", reply_markup=student_reply_keyboard)
-    
-    # Всегда показываем профиль после входа
-    bot.send_message(user_id, "Ваш профиль:")
-    show_profile(types.Message(message_id=0, chat=types.Chat(id=user_id, type='private'), from_user=types.User(id=user_id, first_name='', is_bot=False), date=0, content_type='text', options={}, json_string=''))
+    try:
+        if user_id in USER_STATE:
+            del USER_STATE[user_id]
+        
+        if role == 'teacher':
+            user_keyboard = types.InlineKeyboardMarkup()
+            user_keyboard.add(button_link_inline, button_rating_inline, button_quest_give_inline, button_profile_inline, button_logout_inline)
+            bot.send_message(user_id, "Вы вошли как учитель.", reply_markup=user_keyboard)
+            bot.send_message(user_id, "Для навигации используйте панель ниже.", reply_markup=teacher_reply_keyboard)
+        else:
+            user_keyboard = types.InlineKeyboardMarkup()
+            user_keyboard.add(button_link_inline, button_rating_inline, button_quest_inline, button_profile_inline, button_logout_inline)
+            bot.send_message(user_id, "Вы вошли как ученик.", reply_markup=user_keyboard)
+            bot.send_message(user_id, "Для навигации используй панель ниже.", reply_markup=student_reply_keyboard)
+        
+        # Создаем сообщение для показа профиля
+        
+        show_profile(user_id)
+    except Exception as e:
+        print(f"Ошибка в successful_login: {e}")
+        bot.send_message(user_id, "Произошла ошибка при входе. Пожалуйста, попробуйте снова.")
 
 @bot.message_handler(func=lambda message: message.chat.id in USER_STATE and USER_STATE[message.chat.id]['step'] == 'login_password')
 def process_login_password(message):
@@ -470,7 +490,7 @@ def process_login_password(message):
             bot.send_message(user_id, "Для навигации используй панель ниже.", reply_markup=student_reply_keyboard)
         
         # Показываем профиль
-        show_profile(message)
+        show_profile(message.from_user.id)
         del USER_STATE[user_id]
     else:
         bot.send_message(user_id, "Неверный пароль. Попробуйте еще раз:")
@@ -478,37 +498,29 @@ def process_login_password(message):
 @bot.message_handler(func=lambda message: message.chat.id in USER_STATE and USER_STATE[message.chat.id]['step'] == 'set_password')
 def set_password(message):
     user_id = message.chat.id
-    USER_STATE[user_id]['password'] = message.text.strip()
-    data = USER_STATE[user_id]
+    try:
+        USER_STATE[user_id]['password'] = message.text.strip()
+        data = USER_STATE[user_id]
 
-    print(f"Регистрируем пользователя: {data}")  # Отладочный вывод
-    
-    register_user(
-        first_name=data['first_name'],
-        last_name=data['last_name'],
-        username=data.get('username'),
-        school_class=data.get('school_class'),
-        role='student',
-        user_id=user_id,
-        password=data['password']
-    )
-    
-    # Проверяем, что пользователь добавился
-    conn = sqlite3.connect('users.db')
-    c = conn.cursor()
-    c.execute("SELECT * FROM users WHERE tg_id=?", (user_id,))
-    user = c.fetchone()
-    conn.close()
-    
-    if user:
-        print(f"Пользователь успешно добавлен: {user}")
-        bot.send_message(user_id, f"Регистрация завершена!\nИмя: {data['first_name']}\nФамилия: {data['last_name']}\nКласс: {data['school_class']}")
-        successful_login(user_id, 'student')    
-    else:
-        print("Ошибка: пользователь не добавлен в БД")
-        bot.send_message(user_id, "Произошла ошибка при регистрации. Попробуйте еще раз.")
-    
-    del USER_STATE[user_id]
+        if register_user(
+            first_name=data['first_name'],
+            last_name=data['last_name'],
+            username=data.get('username'),
+            school_class=data.get('school_class'),
+            role='student',
+            user_id=user_id,
+            password=data['password']
+        ):
+            bot.send_message(user_id, f"Регистрация завершена!\nИмя: {data['first_name']}\nФамилия: {data['last_name']}\nКласс: {data['school_class']}")
+            successful_login(user_id, 'student')
+        else:
+            bot.send_message(user_id, "Произошла ошибка при регистрации. Пожалуйста, попробуйте снова.")
+    except Exception as e:
+        print(f"Ошибка в set_password: {e}")
+        bot.send_message(user_id, "Произошла внутренняя ошибка. Пожалуйста, попробуйте позже.")
+    finally:
+        if user_id in USER_STATE:
+            del USER_STATE[user_id]
     
 @bot.message_handler(func=lambda message: message.chat.id in USER_STATE and USER_STATE[message.chat.id]['step'] == 'teacher_set_password')
 def teacher_set_password(message):
@@ -553,37 +565,6 @@ def process_student_answer(message):
         types.InlineKeyboardButton("Неверно", callback_data=f"wrong_{task_id}")
     )
     bot.send_message(teacher_id, f"Ученик отправил ответ на задание ID {task_id}:\n\n{answer}", reply_markup=keyboard)
-
-@bot.callback_query_handler(func=lambda call: call.data.startswith(("correct_", "wrong_")))
-def review_answer(call):
-    task_id = int(call.data.split("_")[1])
-    is_correct = call.data.startswith("correct_")
-    
-    conn = sqlite3.connect('users.db')
-    c = conn.cursor()
-    
-    # Получаем информацию о задании
-    c.execute("SELECT student_id, teacher_id FROM tasks WHERE id=?", (task_id,))
-    student_id, teacher_id = c.fetchone()
-    
-    # Обновляем статус задания
-    status = "completed_correct" if is_correct else "completed_wrong"
-    c.execute("UPDATE tasks SET status=? WHERE id=?", (status, task_id))
-    
-    # Если ответ верный, добавляем баллы ученику
-    if is_correct:
-        c.execute("UPDATE users SET points=points+10 WHERE tg_id=?", (student_id,))
-    
-    conn.commit()
-    conn.close()
-    
-    # Уведомляем ученика
-    result_text = "верно" if is_correct else "неверно"
-    points_text = " +10 баллов" if is_correct else ""
-    bot.send_message(student_id, f"Учитель проверил ваш ответ: {result_text}{points_text}")
-    
-    # Уведомляем учителя
-    bot.send_message(teacher_id, f"Вы отметили ответ как {result_text}.")
 
 @bot.callback_query_handler(func=lambda call: call.data == "quest_give")
 @bot.message_handler(func=lambda message: message.text == "Выдать задание")
@@ -702,12 +683,6 @@ def process_task_grade_selection(call):
 
 def send_letter_selection_for_task(user_id):
     keyboard = types.InlineKeyboardMarkup(row_width=3)
-    buttons = [types.InlineKeyboardButton(letter, callback_data=f"task_class_{letter}") for letter in ["А", "Б", "В"]]
-    keyboard.add(*buttons)
-    bot.send_message(user_id, "Выберите букву класса:", reply_markup=keyboard)
-
-def send_letter_selection_for_task(user_id):
-    keyboard = types.InlineKeyboardMarkup(row_width=3)
     buttons = [types.InlineKeyboardButton(letter, callback_data=f"task_class_{letter}") 
                for letter in ["А", "Б", "В"]]  # Буквы классов
     keyboard.add(*buttons)
@@ -803,32 +778,6 @@ def process_first_name(message):
     USER_STATE[message.chat.id]['step'] = 2
     bot.send_message(message.chat.id, "Теперь введи свою фамилию:")
 
-@bot.message_handler(func=lambda message: message.chat.id in USER_STATE and USER_STATE[message.chat.id]['step'] == 2)
-def process_last_name(message):
-    user_id = message.chat.id
-    USER_STATE[user_id]['last_name'] = message.text.strip()
-    first_name = USER_STATE[user_id]['first_name']
-    last_name = USER_STATE[user_id]['last_name']
-
-    conn = sqlite3.connect('users.db')
-    c = conn.cursor()
-    
-    # Проверяем, существует ли пользователь с таким tg_id
-    c.execute("SELECT * FROM users WHERE tg_id=?", (user_id,))
-    existing_user = c.fetchone()
-    conn.close()
-
-    if existing_user:
-        # Если пользователь существует, переходим к вводу пароля
-        USER_STATE[user_id]['step'] = 'login_password'
-        bot.send_message(user_id, "Вы уже зарегистрированы. Введите пароль для входа:")
-    else:
-        # Если пользователя нет, продолжаем регистрацию
-        USER_STATE[user_id]['step'] = 3
-        skip_keyboard = types.InlineKeyboardMarkup()
-        skip_keyboard.add(types.InlineKeyboardButton("Пропустить", callback_data="skip_username"))
-        bot.send_message(user_id, "Введи свой никнейм (или нажми 'Пропустить'):", reply_markup=skip_keyboard)
-
 @bot.message_handler(func=lambda message: message.chat.id in USER_STATE and USER_STATE[message.chat.id]['step'] == 'login_password')
 def process_login_password(message):
     user_id = message.chat.id
@@ -839,36 +788,29 @@ def process_login_password(message):
     conn = sqlite3.connect('users.db')
     c = conn.cursor()
     
-    # Ищем пользователя по tg_id и паролю
-    c.execute("SELECT * FROM users WHERE tg_id=? AND password=?", 
-             (user_id, password))
+    # Ищем пользователя по имени, фамилии и паролю (включая неактивных)
+    c.execute("SELECT * FROM users WHERE first_name=? AND last_name=? AND password=?", 
+             (first_name, last_name, password))
     user = c.fetchone()
-    conn.close()
-
+    
     if user:
-        # Активируем пользователя
-        conn = sqlite3.connect('users.db')
-        c = conn.cursor()
-        c.execute("UPDATE users SET is_active=1 WHERE tg_id=?", (user_id,))
+        # Проверяем, не занят ли этот аккаунт другим Telegram ID
+        if user[1] != user_id and user[9] == 1:  # user[1] - tg_id, user[9] - is_active
+            bot.send_message(user_id, "Этот аккаунт уже привязан к другому Telegram ID.")
+            conn.close()
+            return
+            
+        # Активируем пользователя с текущим Telegram ID
+        c.execute("UPDATE users SET is_active=1, tg_id=? WHERE first_name=? AND last_name=? AND password=?",
+                 (user_id, first_name, last_name, password))
         conn.commit()
         conn.close()
         
         role = user[8]  # индекс 8 — это поле "role"
-        if role == 'teacher':
-            user_keyboard = types.InlineKeyboardMarkup()
-            user_keyboard.add(button_link_inline, button_rating_inline, button_quest_give_inline, button_logout_inline)
-            bot.send_message(user_id, f"Добро пожаловать обратно, {first_name} {last_name}!", reply_markup=user_keyboard)
-            bot.send_message(user_id, "Для навигации используйте панель ниже.", reply_markup=teacher_reply_keyboard)
-        else:
-            user_keyboard = types.InlineKeyboardMarkup()
-            user_keyboard.add(button_link_inline, button_rating_inline, button_quest_inline, button_logout_inline)
-            bot.send_message(user_id, f"Добро пожаловать обратно, {first_name} {last_name}!", reply_markup=user_keyboard)
-            bot.send_message(user_id, "Для навигации используй панель ниже.", reply_markup=student_reply_keyboard)
-        
-        # Показываем профиль
-        show_profile(message)
+        successful_login(user_id, role)
         del USER_STATE[user_id]
     else:
+        conn.close()
         bot.send_message(user_id, "Неверный пароль. Попробуйте еще раз:")
 
 @bot.callback_query_handler(func=lambda call: call.data == "skip_username")
@@ -909,28 +851,73 @@ def process_class_selection(call):
     USER_STATE[user_id]['step'] = 'set_password'
     bot.send_message(user_id, "Придумай и введи пароль для входа:")
 
-@bot.message_handler(func=lambda message: message.chat.id in USER_STATE and USER_STATE[message.chat.id]['step'] == 'set_password')
-def set_password(message):
+@bot.message_handler(func=lambda message: message.chat.id in USER_STATE and USER_STATE[message.chat.id]['step'] == 2)
+def process_last_name(message):
     user_id = message.chat.id
-    USER_STATE[user_id]['password'] = message.text.strip()
-    data = USER_STATE[user_id]
+    USER_STATE[user_id]['last_name'] = message.text.strip()
+    first_name = USER_STATE[user_id]['first_name']
+    last_name = USER_STATE[user_id]['last_name']
 
-    register_user(
-        first_name=data['first_name'],
-        last_name=data['last_name'],
-        username=data.get('username'),
-        school_class=data.get('school_class'),
-        role='student',
-        user_id=user_id,
-        password=data['password']
-    )
-    bot.send_message(user_id, f"Регистрация завершена!\nИмя: {data['first_name']}\nФамилия: {data['last_name']}\nКласс: {data['school_class']}")
-    del USER_STATE[user_id]
+    conn = sqlite3.connect('users.db')
+    c = conn.cursor()
+    
+    # Проверяем, есть ли активный пользователь с таким tg_id
+    c.execute("SELECT * FROM users WHERE tg_id=? AND is_active=1", (user_id,))
+    active_user = c.fetchone()
+    
+    if active_user:
+        # Если активный пользователь существует, просим пароль
+        USER_STATE[user_id]['step'] = 'login_password'
+        bot.send_message(user_id, "Вы уже зарегистрированы. Введите пароль для входа:")
+    else:
+        # Проверяем, есть ли неактивный пользователь с таким именем и фамилией
+        c.execute("SELECT * FROM users WHERE first_name=? AND last_name=? AND is_active=0", 
+                 (first_name, last_name))
+        inactive_user = c.fetchone()
+        
+        if inactive_user:
+            # Если есть неактивный пользователь, предлагаем восстановить или создать новый
+            keyboard = types.InlineKeyboardMarkup()
+            keyboard.add(
+                types.InlineKeyboardButton("Восстановить аккаунт", callback_data="restore_account"),
+                types.InlineKeyboardButton("Создать новый", callback_data="new_account")
+            )
+            bot.send_message(user_id, "Найдена предыдущая регистрация с такими именем и фамилией. Хотите восстановить аккаунт или создать новый?", reply_markup=keyboard)
+        else:
+            # Если пользователя нет вообще, продолжаем регистрацию
+            USER_STATE[user_id]['step'] = 3
+            skip_keyboard = types.InlineKeyboardMarkup()
+            skip_keyboard.add(types.InlineKeyboardButton("Пропустить", callback_data="skip_username"))
+            bot.send_message(user_id, "Введи свой никнейм (или нажми 'Пропустить'):", reply_markup=skip_keyboard)
+    
+    conn.close()
+
+@bot.callback_query_handler(func=lambda call: call.data == "restore_account")
+def restore_account(call):
+    user_id = call.message.chat.id
+    USER_STATE[user_id]['step'] = 'login_password'
+    bot.send_message(user_id, "Введите пароль для восстановления аккаунта:")
+
+@bot.callback_query_handler(func=lambda call: call.data == "new_account")
+def new_account(call):
+    user_id = call.message.chat.id
+    # Очищаем данные предыдущей попытки регистрации
+    USER_STATE[user_id] = {
+        'step': 3,
+        'first_name': USER_STATE[user_id]['first_name'],
+        'last_name': USER_STATE[user_id]['last_name']
+    }
+    skip_keyboard = types.InlineKeyboardMarkup()
+    skip_keyboard.add(types.InlineKeyboardButton("Пропустить", callback_data="skip_username"))
+    bot.send_message(user_id, "Введи свой никнейм (или нажми 'Пропустить'):", reply_markup=skip_keyboard)
 
 if __name__ == "__main__":
     print("Бот запущен.")
     create_db()
-    try:
-        bot.polling(non_stop=True, interval=1)
-    except Exception as e:
-        print(f"Ошибка при запуске бота: {e}")
+    while True:
+        try:
+            bot.polling(non_stop=True, interval=1)
+        except Exception as e:
+            print(f"Ошибка в работе бота: {e}")
+            print("Перезапуск через 5 секунд...")
+            time.sleep(5)
