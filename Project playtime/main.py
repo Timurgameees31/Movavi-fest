@@ -1,11 +1,52 @@
 import telebot
 from telebot import types
-import sqlite3
 import time
+from sqlalchemy import create_engine, Column, Integer, String, Text, DateTime, Boolean, ForeignKey, func
+from sqlalchemy.orm import sessionmaker, declarative_base, relationship
+from sqlalchemy.exc import SQLAlchemyError
+import sqlite3
 
+Base = declarative_base()
+
+# Модели данных
+class User(Base):
+    __tablename__ = 'users'
+    id = Column(Integer, primary_key=True)
+    tg_id = Column(Integer, unique=True)
+    first_name = Column(String(100), nullable=False)
+    last_name = Column(String(100), nullable=False)
+    username = Column(String(100))
+    password = Column(String(100), nullable=False)
+    school_class = Column(String(10))
+    points = Column(Integer, default=0)
+    role = Column(String(20), default='student')
+    is_active = Column(Boolean, default=True)
+    
+    tasks_student = relationship("Task", foreign_keys="Task.student_id", back_populates="student")
+    tasks_teacher = relationship("Task", foreign_keys="Task.teacher_id", back_populates="teacher")
+
+class Task(Base):
+    __tablename__ = 'tasks'
+    id = Column(Integer, primary_key=True)
+    student_id = Column(Integer, ForeignKey('users.id'))
+    teacher_id = Column(Integer, ForeignKey('users.id'))
+    task_text = Column(Text)
+    answer_text = Column(Text)
+    points = Column(Integer, default=10)
+    status = Column(String(20), default='pending')
+    timestamp = Column(DateTime, default=func.now())
+    
+    student = relationship("User", foreign_keys=[student_id], back_populates="tasks_student")
+    teacher = relationship("User", foreign_keys=[teacher_id], back_populates="tasks_teacher")
+
+# Настройка подключения к БД
+engine = create_engine('sqlite:///users.db', connect_args={'check_same_thread': False})
+Session = sessionmaker(bind=engine)
+Base.metadata.create_all(engine)
+
+# Остальной код (токен бота и т.д.)
 Token = '7547849192:AAGQafZV9WP05FBSnsTiE4QIwoqnoEhKcl8' 
 bot = telebot.TeleBot(Token)
-
 teacher_code = "nebulabrasque721"
 
 # Подключаемся к базе данных
@@ -144,50 +185,48 @@ def create_db():
     conn.close()
 
 def register_user(first_name, last_name, username=None, school_class=None, role='student', user_id=None, password=None):
-    if not password or not user_id:
-        print("Не хватает обязательных данных для регистрации.")
-        return False
-
+    session = Session()
     try:
-        with sqlite3.connect('users.db', timeout=10) as conn:
-            c = conn.cursor()
-            
-            # Проверяем существование активного пользователя с таким tg_id
-            c.execute("SELECT * FROM users WHERE tg_id=? AND is_active=1", (user_id,))
-            active_user = c.fetchone()
-            
-            if active_user:
-                print("Активный пользователь с таким ID уже существует")
-                return False
-                
-            # Проверяем существование пользователя с таким именем и фамилией
-            c.execute("SELECT * FROM users WHERE first_name=? AND last_name=?", 
-                      (first_name, last_name))
-            existing_user = c.fetchone()
-            
-            if existing_user:
-                # Если пользователь существует, но неактивен - обновляем его данные
-                c.execute("""UPDATE users SET 
-                            tg_id=?,
-                            username=?, 
-                            school_class=?, 
-                            role=?, 
-                            password=?, 
-                            is_active=1 
-                            WHERE first_name=? AND last_name=?""",
-                         (user_id, username, school_class, role, password, first_name, last_name))
-            else:
-                # Если пользователя нет, создаем нового
-                c.execute("""INSERT INTO users 
-                           (tg_id, first_name, last_name, username, school_class, points, role, password, is_active)
-                           VALUES (?, ?, ?, ?, ?, 0, ?, ?, 1)""",
-                        (user_id, first_name, last_name, username, school_class, role, password))
-            
-            conn.commit()
-            return True
-    except Exception as e:
-        print(f"Ошибка при регистрации пользователя: {e}")
+        # Проверяем существование активного пользователя
+        active_user = session.query(User).filter_by(tg_id=user_id, is_active=True).first()
+        if active_user:
+            return False
+
+        # Ищем существующего пользователя
+        existing_user = session.query(User).filter_by(
+            first_name=first_name, 
+            last_name=last_name
+        ).first()
+
+        if existing_user:
+            # Обновляем существующего пользователя
+            existing_user.tg_id = user_id
+            existing_user.username = username
+            existing_user.school_class = school_class
+            existing_user.role = role
+            existing_user.password = password
+            existing_user.is_active = True
+        else:
+            # Создаем нового пользователя
+            new_user = User(
+                tg_id=user_id,
+                first_name=first_name,
+                last_name=last_name,
+                username=username,
+                password=password,
+                school_class=school_class,
+                role=role
+            )
+            session.add(new_user)
+        
+        session.commit()
+        return True
+    except SQLAlchemyError as e:
+        session.rollback()
+        print(f"Ошибка регистрации: {e}")
         return False
+    finally:
+        session.close()
     
 @bot.message_handler(commands=['start'])
 def start_message(message):
@@ -268,7 +307,7 @@ def teacher_set_password(message):
     )
 
     user_keyboard = types.InlineKeyboardMarkup()
-    user_keyboard.add(button_link_inline, button_rating_inline, button_quest_give_inline, button_logout_inline)
+    user_keyboard.add(button_link_inline, button_rating_inline, button_quest_give_inline, button_profile_inline, button_logout_inline)
     bot.send_message(user_id, "Вы вошли как учитель. Вы можете давать задания ученикам.", reply_markup=user_keyboard)
     bot.send_message(user_id, "Для навигации используйте панель ниже.", reply_markup=teacher_reply_keyboard)
 
@@ -287,19 +326,23 @@ def check_teacher_password(message):
 @bot.message_handler(func=lambda message: message.text == "Получить задание")
 def send_task(call_or_msg):
     chat_id = call_or_msg.message.chat.id if hasattr(call_or_msg, 'message') else call_or_msg.chat.id
-    
-    conn = sqlite3.connect('users.db')
-    c = conn.cursor()
-    c.execute("SELECT task_text, id FROM tasks WHERE student_id=? AND status='pending'", (chat_id,))
-    task = c.fetchone()
-    conn.close()
-    
-    if task:
-        task_text, task_id = task
-        bot.send_message(chat_id, f"Ваше задание:\n{task_text}\n\nОтправьте ответ на это сообщение.")
-        USER_STATE[chat_id] = {'step': 'send_answer', 'task_id': task_id}
-    else:
-        bot.send_message(chat_id, "У вас нет новых заданий.")
+    session = Session()
+    try:
+        user = session.query(User).filter_by(tg_id=chat_id, is_active=True).first()
+        if not user:
+            return
+
+        task = session.query(Task).filter_by(student_id=user.id, status='pending').first()
+        if task:
+            bot.send_message(chat_id, f"Ваше задание:\n{task.task_text}\n\nОтправьте ответ на это сообщение.")
+            USER_STATE[chat_id] = {'step': 'send_answer', 'task_id': task.id}
+        else:
+            bot.send_message(chat_id, "У вас нет новых заданий.")
+    except SQLAlchemyError as e:
+        print(f"Ошибка получения задания: {e}")
+    finally:
+        session.close()
+
 
 @bot.message_handler(func=lambda message: message.chat.id in USER_STATE and USER_STATE[message.chat.id]['step'] == 'get_student_id')
 def process_student_id(message):
@@ -330,99 +373,62 @@ def process_student_id(message):
         bot.send_message(user_id, "ID ученика должен быть числом. Попробуйте еще раз:")
 
 def show_profile(user_id):
-    conn = sqlite3.connect('users.db')
-    c = conn.cursor()
-    
+    session = Session()
     try:
-        # Получаем данные текущего активного пользователя
-        c.execute("""
-            SELECT first_name, last_name, username, school_class, points, role 
-            FROM users 
-            WHERE tg_id=? AND is_active=1
-            LIMIT 1
-        """, (user_id,))
-        user_data = c.fetchone()
-        
-        if not user_data:
-            bot.send_message(user_id, "Профиль не найден. Пожалуйста, войдите в аккаунт.")
+        user = session.query(User).filter_by(tg_id=user_id, is_active=True).first()
+        if not user:
+            bot.send_message(user_id, "Профиль не найден")
             return
-        
-        first_name, last_name, username, school_class, points, role = user_data
-        
-        # Обработка случая, когда username равен None
-        username_display = f"@{username}" if username else "не указан"
-        
-        if role == 'student':
-            # Формируем информацию для ученика
+
+        if user.role == 'student':
             profile_text = f"""
 📌 *Профиль ученика*:
-
-👤 *Имя:* {first_name} {last_name}
-🔖 *Никнейм:* {username_display}
-🏫 *Класс:* {school_class if school_class else 'не указан'}
+👤 *Имя:* {user.first_name} {user.last_name}
+🔖 *Никнейм:* @{user.username if user.username else 'не указан'}
+🏫 *Класс:* {user.school_class if user.school_class else 'не указан'}
 🆔 *Telegram ID:* `{user_id}`
-
-🏆 *Баллы:* {points}
+🏆 *Баллы:* {user.points}
 """
-            # Добавляем место в параллели, если указан класс
-            if school_class and len(school_class) > 1:
-                try:
-                    parallel = school_class[:-1]
-                    c.execute("""
-                        SELECT COUNT(*) + 1 
-                        FROM users 
-                        WHERE school_class LIKE ? || '%' 
-                        AND points > ? 
-                        AND role = 'student' 
-                        AND is_active = 1
-                    """, (parallel, points))
-                    position = c.fetchone()[0]
-                    
-                    c.execute("""
-                        SELECT COUNT(*) 
-                        FROM users 
-                        WHERE school_class LIKE ? || '%' 
-                        AND role = 'student' 
-                        AND is_active = 1
-                    """, (parallel,))
-                    total_in_parallel = c.fetchone()[0]
-                    
-                    profile_text += f"📊 *Место в параллели:* {position} из {total_in_parallel}\n"
-                except Exception as e:
-                    print(f"Ошибка при расчете рейтинга: {e}")
-                    profile_text += "📊 *Место в параллели:* данные временно недоступны\n"
-        
-        else:  # Для учителя
-            # Получаем статистику заданий
-            c.execute("SELECT COUNT(*) FROM tasks WHERE teacher_id=?", (user_id,))
-            tasks_given = c.fetchone()[0]
-            
-            c.execute("""
-                SELECT COUNT(*) 
-                FROM tasks 
-                WHERE teacher_id=? 
-                AND status IN ('completed_correct', 'completed_wrong')
-            """, (user_id,))
-            tasks_checked = c.fetchone()[0]
-            
+            if user.school_class and len(user.school_class) > 1:
+                parallel = user.school_class[:-1]
+                # Расчет места в параллели
+                count = session.query(func.count(User.id)).filter(
+                    User.school_class.like(f"{parallel}%"),
+                    User.points > user.points,
+                    User.role == 'student',
+                    User.is_active == True
+                ).scalar() + 1
+                
+                total = session.query(func.count(User.id)).filter(
+                    User.school_class.like(f"{parallel}%"),
+                    User.role == 'student',
+                    User.is_active == True
+                ).scalar()
+                
+                profile_text += f"📊 *Место в параллели:* {count} из {total}\n"
+        else:
+            # Логика для учителя
+            tasks_given = session.query(Task).filter_by(teacher_id=user.id).count()
+            tasks_checked = session.query(Task).filter(
+                Task.teacher_id == user.id,
+                Task.status.in_(['completed_correct', 'completed_wrong'])
+            ).count()
+
             profile_text = f"""
 📌 *Профиль учителя*:
-
-👤 *Имя:* {first_name} {last_name}
-🔖 *Никнейм:* {username_display}
+👤 *Имя:* {user.first_name} {user.last_name}
+🔖 *Никнейм:* @{user.username if user.username else 'не указан'}
 🆔 *Telegram ID:* `{user_id}`
-
 📝 *Заданий выдано:* {tasks_given}
 ✅ *Заданий проверено:* {tasks_checked}
 """
-        
+
         bot.send_message(user_id, profile_text, parse_mode='Markdown')
-        
-    except Exception as e:
-        print(f"Ошибка при отображении профиля: {e}")
-        bot.send_message(user_id, "Произошла ошибка при загрузке профиля. Пожалуйста, попробуйте позже.")
+    except SQLAlchemyError as e:
+        print(f"Ошибка профиля: {e}")
+        bot.send_message(user_id, "Ошибка загрузки профиля")
     finally:
-        conn.close()
+        session.close()
 
 @bot.callback_query_handler(func=lambda call: call.data == "profile")
 def profile_callback(call):
@@ -460,40 +466,34 @@ def process_login_password(message):
     first_name = USER_STATE[user_id]['first_name']
     last_name = USER_STATE[user_id]['last_name']
 
-    conn = sqlite3.connect('users.db')
-    c = conn.cursor()
-    # Ищем пользователя по имени, фамилии и паролю (независимо от is_active)
-    c.execute("SELECT * FROM users WHERE first_name=? AND last_name=? AND password=?", 
-              (first_name, last_name, password))
-    user = c.fetchone()
-    conn.close()
+    session = Session()
+    try:
+        user = session.query(User).filter_by(
+            first_name=first_name,
+            last_name=last_name,
+            password=password
+        ).first()
 
-    if user:
-        # Активируем пользователя (устанавливаем is_active=1)
-        conn = sqlite3.connect('users.db')
-        c = conn.cursor()
-        c.execute("UPDATE users SET is_active=1 WHERE tg_id=?", (user[1],))  # user[1] - это tg_id
-        conn.commit()
-        conn.close()
-        
-        # Устанавливаем клавиатуру в зависимости от роли
-        role = user[8]  # индекс 8 — это поле "role"
-        if role == 'teacher':
-            user_keyboard = types.InlineKeyboardMarkup()
-            user_keyboard.add(button_link_inline, button_rating_inline, button_quest_give_inline, button_profile_inline, button_logout_inline)
-            bot.send_message(user_id, f"Добро пожаловать обратно, {first_name} {last_name}!", reply_markup=user_keyboard)
-            bot.send_message(user_id, "Для навигации используйте панель ниже.", reply_markup=teacher_reply_keyboard)
+        if user:
+            # Проверяем, не занят ли аккаунт другим пользователем
+            if user.tg_id != user_id and user.is_active:
+                bot.send_message(user_id, "Этот аккаунт уже используется")
+                return
+
+            user.tg_id = user_id
+            user.is_active = True
+            session.commit()
+            
+            successful_login(user_id, user.role)
         else:
-            user_keyboard = types.InlineKeyboardMarkup()
-            user_keyboard.add(button_link_inline, button_rating_inline, button_quest_inline, button_profile_inline, button_logout_inline)
-            bot.send_message(user_id, f"Добро пожаловать обратно, {first_name} {last_name}!", reply_markup=user_keyboard)
-            bot.send_message(user_id, "Для навигации используй панель ниже.", reply_markup=student_reply_keyboard)
-        
-        # Показываем профиль
-        show_profile(message.from_user.id)
-        del USER_STATE[user_id]
-    else:
-        bot.send_message(user_id, "Неверный пароль. Попробуйте еще раз:")
+            bot.send_message(user_id, "Неверный пароль. Попробуйте еще раз:")
+    except SQLAlchemyError as e:
+        session.rollback()
+        print(f"Ошибка входа: {e}")
+    finally:
+        session.close()
+        if user and user.tg_id == user_id:
+            del USER_STATE[user_id]
 
 @bot.message_handler(func=lambda message: message.chat.id in USER_STATE and USER_STATE[message.chat.id]['step'] == 'set_password')
 def set_password(message):
@@ -545,26 +545,36 @@ def process_student_answer(message):
     task_id = USER_STATE[user_id]['task_id']
     answer = message.text
     
-    conn = sqlite3.connect('users.db')
-    c = conn.cursor()
-    c.execute("UPDATE tasks SET answer_text=?, status='waiting_review' WHERE id=?", (answer, task_id))
-    conn.commit()
-    
-    # Получаем ID учителя, который выдал задание
-    c.execute("SELECT teacher_id FROM tasks WHERE id=?", (task_id,))
-    teacher_id = c.fetchone()[0]
-    conn.close()
-    
-    del USER_STATE[user_id]
-    bot.send_message(user_id, "Ваш ответ отправлен учителю на проверку.")
-    
-    # Уведомляем учителя
-    keyboard = types.InlineKeyboardMarkup()
-    keyboard.add(
-        types.InlineKeyboardButton("Верно", callback_data=f"correct_{task_id}"),
-        types.InlineKeyboardButton("Неверно", callback_data=f"wrong_{task_id}")
-    )
-    bot.send_message(teacher_id, f"Ученик отправил ответ на задание ID {task_id}:\n\n{answer}", reply_markup=keyboard)
+    session = Session()
+    try:
+        task = session.query(Task).get(task_id)
+        if not task:
+            bot.send_message(user_id, "Ошибка: задание не найдено")
+            return
+
+        task.answer_text = answer
+        task.status = 'waiting_review'
+        session.commit()
+        
+        # Уведомляем учителя
+        keyboard = types.InlineKeyboardMarkup()
+        keyboard.add(
+            types.InlineKeyboardButton("Верно", callback_data=f"correct_{task_id}"),
+            types.InlineKeyboardButton("Неверно", callback_data=f"wrong_{task_id}")
+        )
+        bot.send_message(task.teacher.tg_id, 
+                        f"Ученик отправил ответ на задание ID {task_id}:\n\n{answer}", 
+                        reply_markup=keyboard)
+        
+        bot.send_message(user_id, "Ваш ответ отправлен учителю на проверку.")
+    except SQLAlchemyError as e:
+        session.rollback()
+        print(f"Ошибка отправки ответа: {e}")
+        bot.send_message(user_id, "Ошибка отправки ответа")
+    finally:
+        session.close()
+        if user_id in USER_STATE:
+            del USER_STATE[user_id]
 
 @bot.callback_query_handler(func=lambda call: call.data == "quest_give")
 @bot.message_handler(func=lambda message: message.text == "Выдать задание")
@@ -709,63 +719,67 @@ def review_answer(call):
     task_id = int(call.data.split("_")[1])
     is_correct = call.data.startswith("correct_")
     
-    conn = sqlite3.connect('users.db')
-    c = conn.cursor()
-    
-    # Получаем информацию о задании, включая баллы
-    c.execute("SELECT student_id, teacher_id, points FROM tasks WHERE id=?", (task_id,))
-    student_id, teacher_id, points = c.fetchone()
-    
-    # Обновляем статус задания
-    status = "completed_correct" if is_correct else "completed_wrong"
-    c.execute("UPDATE tasks SET status=? WHERE id=?", (status, task_id))
-    
-    # Если ответ верный, добавляем баллы ученику
-    if is_correct:
-        c.execute("UPDATE users SET points=points+? WHERE tg_id=?", (points, student_id))
-    
-    conn.commit()
-    conn.close()
-    
-    # Уведомляем ученика
-    result_text = "верно" if is_correct else "неверно"
-    points_text = f" +{points} баллов" if is_correct else ""
-    bot.send_message(student_id, f"Учитель проверил ваш ответ: {result_text}{points_text}")
-    
-    # Уведомляем учителя
-    bot.send_message(teacher_id, f"Вы отметили ответ как {result_text}. Ученик {'получил' if is_correct else 'не получил'} {points} баллов.")
+    session = Session()
+    try:
+        task = session.query(Task).get(task_id)
+        if not task:
+            return
+
+        task.status = "completed_correct" if is_correct else "completed_wrong"
+        
+        if is_correct:
+            task.student.points += task.points
+        
+        session.commit()
+        
+        # Уведомляем ученика
+        result_text = "верно" if is_correct else "неверно"
+        points_text = f" +{task.points} баллов" if is_correct else ""
+        bot.send_message(task.student.tg_id, f"Учитель проверил ваш ответ: {result_text}{points_text}")
+        
+        # Уведомляем учителя
+        bot.send_message(call.message.chat.id, 
+                       f"Вы отметили ответ как {result_text}. Ученик {'получил' if is_correct else 'не получил'} {task.points} баллов.")
+    except SQLAlchemyError as e:
+        session.rollback()
+        print(f"Ошибка проверки задания: {e}")
+    finally:
+        session.close()
 
 @bot.callback_query_handler(func=lambda call: call.data == "rating")
 def show_rating(call):
-    conn = sqlite3.connect('users.db')
-    c = conn.cursor()
-    # Показываем всех пользователей, не только активных
-    c.execute("SELECT first_name, last_name, school_class, points FROM users WHERE school_class IS NOT NULL ORDER BY points DESC")
-    users = c.fetchall()
-    conn.close()
-    
-    if not users:
-        bot.send_message(call.message.chat.id, "Пока нет зарегистрированных пользователей.")
-        return
-    
-    # Группируем по параллелям
-    parallel_users = {}
-    for first_name, last_name, school_class, points in users:
-        if school_class and len(school_class) > 1:
-            parallel = school_class[:-1]
-            parallel_users.setdefault(parallel, [])
-            parallel_users[parallel].append((first_name, last_name, school_class, points))
-    
-    # Формируем рейтинг
-    rating_text = "🏆 Рейтинг всех пользователей:\n\n"
-    for parallel, users_in_parallel in parallel_users.items():
-        rating_text += f"Параллель {parallel}:\n"
-        for i, (fn, ln, sc, pts) in enumerate(users_in_parallel[:10], 1):  # Топ-10 для каждой параллели
-            rating_text += f"{i}. {fn} {ln} ({sc}) - {pts} баллов\n"
-        rating_text += "\n"
-    
-    bot.send_message(call.message.chat.id, rating_text)
+    session = Session()
+    try:
+        users = session.query(User).filter(
+            User.school_class.isnot(None),
+            User.is_active == True
+        ).order_by(User.points.desc()).all()
 
+        if not users:
+            bot.send_message(call.message.chat.id, "Нет данных для рейтинга")
+            return
+
+        rating_text = "🏆 Рейтинг пользователей:\n\n"
+        parallels = {}
+        
+        for user in users:
+            if user.school_class and len(user.school_class) > 1:
+                parallel = user.school_class[:-1]
+                parallels.setdefault(parallel, [])
+                parallels[parallel].append(user)
+
+        for parallel, users_in_parallel in parallels.items():
+            rating_text += f"Параллель {parallel}:\n"
+            for i, user in enumerate(users_in_parallel[:10], 1):
+                rating_text += f"{i}. {user.first_name} {user.last_name} ({user.school_class}) - {user.points} баллов\n"
+            rating_text += "\n"
+
+        bot.send_message(call.message.chat.id, rating_text)
+    except SQLAlchemyError as e:
+        print(f"Ошибка рейтинга: {e}")
+    finally:
+        session.close()
+        
 @bot.callback_query_handler(func=lambda call: call.data == "registration")
 def start_registration(call):
     user_id = call.message.chat.id
