@@ -320,8 +320,7 @@ def logout_user(message):
     c.execute("UPDATE users SET is_active=0 WHERE tg_id=? AND is_active=1", (user_id,))
     conn.commit()
     conn.close()
-    
-    # Очищаем состояние
+
     if user_id in USER_STATE:
         del USER_STATE[user_id]
         
@@ -332,7 +331,7 @@ def logout_user_callback(call):
     user_id = call.message.chat.id
     conn = sqlite3.connect('users.db')
     c = conn.cursor()
-    # Просто деактивируем текущего пользователя (не удаляем)
+    # Деактивация пользователя (не удаление)
     c.execute("UPDATE users SET is_active=0 WHERE tg_id=? AND is_active=1", (user_id,))
     conn.commit()
     conn.close()
@@ -674,7 +673,7 @@ def process_task_points(message):
         else:
             # Отправка всему классу (аналогичные исправления)
             school_class = USER_STATE[user_id]['school_class']
-            students = session.query(User).filter_by(school_class=school_class, role='student', is_active=True).all()
+            students = session.query(User).filter_by(school_class=school_class, role='student').all()
             
             if not students:
                 bot.send_message(user_id, f"В классе {school_class} нет активных учеников.")
@@ -803,8 +802,7 @@ def show_rating(message_or_call):
     try:
         users = session.query(User).filter(
             User.school_class.isnot(None),
-            User.role == 'student',
-            User.is_active == True
+            User.role == 'student'
         ).order_by(User.points.desc()).all()
 
         if not users:
